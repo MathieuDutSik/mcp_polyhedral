@@ -224,9 +224,9 @@ fn tool_dual_description_descriptor() -> Value {
                     "enum": ["safe_rational", "rational", "cpp_rational", "mpq_rational"],
                     "default": "safe_rational"
                 },
-                "backend": {
+                "method": {
                     "type": "string",
-                    "description": "Dual-description backend. Defaults to 'cdd'.",
+                    "description": "Dual-description method. Defaults to 'cdd'.",
                     "enum": ["cdd", "lrs", "ppl_ext", "cdd_ext", "normaliz", "glrs"],
                     "default": "cdd"
                 }
@@ -264,7 +264,7 @@ async fn run_dual_description(args: &Value) -> Value {
         .unwrap_or("safe_rational");
 
     let backend = args
-        .get("backend")
+        .get("method")
         .and_then(|b| b.as_str())
         .unwrap_or("cdd");
 
@@ -835,7 +835,7 @@ mod tests {
         }
         let args = json!({
             "matrix": [[1,0,0],[0,1,0],[0,0,1]],
-            "backend": "lrs"
+            "method": "lrs"
         });
         let result = run_dual_description(&args).await;
         if result.get("isError").map(|v| v == true).unwrap_or(false) {
@@ -845,6 +845,60 @@ mod tests {
             let text = result["content"][0]["text"].as_str().unwrap();
             let parsed: Value = serde_json::from_str(text).unwrap();
             assert!(parsed["matrix"].is_array());
+        }
+    }
+
+    /// Schlafli polytope: 27 vertices (V-rep, 7 cols) → 99 facets (H-rep).
+    ///
+    /// Input taken from G6.ext (27 extreme rays of the Schlafli polytope).
+    #[tokio::test]
+    async fn integration_schlafli_polytope_27_vertices_to_99_facets() {
+        if !binary_available() {
+            eprintln!("SKIP: POLY_dual_description not found in PATH");
+            return;
+        }
+        let args = json!({
+            "matrix": [
+                [ 1,  0,  0,  0,  0,  0,  0],
+                [ 1, -1,  0,  0,  0,  0, -1],
+                [ 1,  0, -1,  0,  0,  0, -1],
+                [ 1,  0,  0, -1,  0,  0, -1],
+                [ 1,  0,  0,  0, -1,  0, -1],
+                [ 1,  0,  0,  0,  0, -1, -1],
+                [ 1,  1,  1,  0,  0,  0,  1],
+                [ 1,  1,  0,  1,  0,  0,  1],
+                [ 1,  1,  0,  0,  1,  0,  1],
+                [ 1,  1,  0,  0,  0,  1,  1],
+                [ 1,  0,  1,  1,  0,  0,  1],
+                [ 1,  0,  1,  0,  1,  0,  1],
+                [ 1,  0,  1,  0,  0,  1,  1],
+                [ 1,  0,  0,  1,  1,  0,  1],
+                [ 1,  0,  0,  1,  0,  1,  1],
+                [ 1,  0,  0,  0,  1,  1,  1],
+                [ 1,  1,  1,  1,  1,  1,  3],
+                [ 1,  1,  0,  0,  0,  0,  0],
+                [ 1,  0,  1,  0,  0,  0,  0],
+                [ 1,  0,  0,  1,  0,  0,  0],
+                [ 1,  0,  0,  0,  1,  0,  0],
+                [ 1,  0,  0,  0,  0,  1,  0],
+                [ 1,  0,  1,  1,  1,  1,  2],
+                [ 1,  1,  0,  1,  1,  1,  2],
+                [ 1,  1,  1,  0,  1,  1,  2],
+                [ 1,  1,  1,  1,  0,  1,  2],
+                [ 1,  1,  1,  1,  1,  0,  2]
+            ]
+        });
+        let result = run_dual_description(&args).await;
+        assert!(
+            result.get("isError").is_none() || result["isError"] != true,
+            "unexpected error: {result:?}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        let rows = parsed["matrix"].as_array().unwrap();
+        assert_eq!(rows.len(), 99, "expected 99 facets, got {}", rows.len());
+        for row in rows {
+            assert_eq!(row.as_array().unwrap().len(), 7);
         }
     }
 
