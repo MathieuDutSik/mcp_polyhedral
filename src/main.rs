@@ -477,3 +477,395 @@ fn tool_error(message: &str) -> Value {
         }]
     })
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // -----------------------------------------------------------------------
+    // parse_integer_matrix
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_valid_2x3() {
+        let m = parse_integer_matrix("2 3\n1 2 3\n4 5 6\n").unwrap();
+        assert_eq!(m, vec![vec![1, 2, 3], vec![4, 5, 6]]);
+    }
+
+    #[test]
+    fn parse_valid_1x1() {
+        let m = parse_integer_matrix("1 1\n42\n").unwrap();
+        assert_eq!(m, vec![vec![42]]);
+    }
+
+    #[test]
+    fn parse_zero_rows() {
+        let m = parse_integer_matrix("0 3\n").unwrap();
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn parse_negative_values() {
+        let m = parse_integer_matrix("1 2\n-3 7\n").unwrap();
+        assert_eq!(m, vec![vec![-3, 7]]);
+    }
+
+    #[test]
+    fn parse_extra_blank_lines() {
+        let m = parse_integer_matrix("\n\n2 2\n\n1 0\n0 1\n\n").unwrap();
+        assert_eq!(m, vec![vec![1, 0], vec![0, 1]]);
+    }
+
+    #[test]
+    fn parse_multiple_spaces_in_row() {
+        let m = parse_integer_matrix("1 3\n1  0  0\n").unwrap();
+        assert_eq!(m, vec![vec![1, 0, 0]]);
+    }
+
+    #[test]
+    fn parse_empty_string_errors() {
+        assert!(parse_integer_matrix("").is_err());
+    }
+
+    #[test]
+    fn parse_missing_row_errors() {
+        // Header claims 2 rows but only 1 is present.
+        assert!(parse_integer_matrix("2 2\n1 0\n").is_err());
+    }
+
+    #[test]
+    fn parse_wrong_col_count_errors() {
+        // Header says 3 cols but row only has 2.
+        assert!(parse_integer_matrix("1 3\n1 2\n").is_err());
+    }
+
+    #[test]
+    fn parse_non_integer_token_errors() {
+        assert!(parse_integer_matrix("1 2\n1 abc\n").is_err());
+    }
+
+    #[test]
+    fn parse_missing_col_count_errors() {
+        // Header has only one number (no column count).
+        assert!(parse_integer_matrix("2\n1 0\n0 1\n").is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // JSON-RPC / MCP response helpers
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn jsonrpc_ok_structure() {
+        let resp = jsonrpc_ok(json!(7), json!({"x": 1}));
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 7);
+        assert_eq!(resp["result"]["x"], 1);
+        assert!(resp.get("error").is_none());
+    }
+
+    #[test]
+    fn jsonrpc_ok_null_id() {
+        let resp = jsonrpc_ok(Value::Null, json!({}));
+        assert_eq!(resp["id"], Value::Null);
+    }
+
+    #[test]
+    fn jsonrpc_error_structure() {
+        let resp = jsonrpc_error(json!(3), -32601, "Method not found");
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 3);
+        assert_eq!(resp["error"]["code"], -32601);
+        assert_eq!(resp["error"]["message"], "Method not found");
+    }
+
+    #[test]
+    fn tool_ok_structure() {
+        let resp = tool_ok(json!({"matrix": [[1, 0]]}));
+        assert!(resp.get("isError").is_none());
+        let content = resp["content"].as_array().unwrap();
+        assert!(!content.is_empty());
+        assert_eq!(content[0]["type"], "text");
+        let text = content[0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert!(parsed["matrix"].is_array());
+    }
+
+    #[test]
+    fn tool_error_structure() {
+        let resp = tool_error("oops");
+        assert_eq!(resp["isError"], true);
+        let content = resp["content"].as_array().unwrap();
+        assert_eq!(content[0]["text"], "oops");
+    }
+
+    // -----------------------------------------------------------------------
+    // MCP handlers (synchronous)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn initialize_fields() {
+        let r = handle_initialize();
+        assert_eq!(r["protocolVersion"], PROTOCOL_VERSION);
+        assert_eq!(r["serverInfo"]["name"], SERVER_NAME);
+        assert_eq!(r["serverInfo"]["version"], SERVER_VERSION);
+        assert!(r["capabilities"]["tools"].is_object());
+    }
+
+    #[test]
+    fn tools_list_contains_dual_description() {
+        let r = handle_tools_list();
+        let tools = r["tools"].as_array().unwrap();
+        let dual = tools.iter().find(|t| t["name"] == TOOL_DUAL_DESCRIPTION);
+        assert!(dual.is_some(), "dual_description not in tool list");
+        let d = dual.unwrap();
+        assert!(!d["description"].as_str().unwrap().is_empty());
+        assert_eq!(d["inputSchema"]["required"][0], "matrix");
+    }
+
+    // -----------------------------------------------------------------------
+    // Message dispatch (asynchronous)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn handle_message_initialize() {
+        let msg = json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{}});
+        let resp = handle_message(&msg).await.unwrap();
+        assert_eq!(resp["jsonrpc"], "2.0");
+        assert_eq!(resp["id"], 1);
+        assert!(resp["result"]["protocolVersion"].is_string());
+    }
+
+    #[tokio::test]
+    async fn handle_message_ping() {
+        let msg = json!({"jsonrpc":"2.0","id":2,"method":"ping"});
+        let resp = handle_message(&msg).await.unwrap();
+        assert_eq!(resp["id"], 2);
+        assert!(resp["result"].is_object());
+    }
+
+    #[tokio::test]
+    async fn handle_message_tools_list() {
+        let msg = json!({"jsonrpc":"2.0","id":3,"method":"tools/list"});
+        let resp = handle_message(&msg).await.unwrap();
+        assert_eq!(resp["id"], 3);
+        assert!(resp["result"]["tools"].is_array());
+    }
+
+    #[tokio::test]
+    async fn handle_message_unknown_method_returns_error() {
+        let msg = json!({"jsonrpc":"2.0","id":4,"method":"no_such_method"});
+        let resp = handle_message(&msg).await.unwrap();
+        assert_eq!(resp["id"], 4);
+        assert_eq!(resp["error"]["code"], -32601);
+    }
+
+    #[tokio::test]
+    async fn handle_message_initialized_notification_returns_none() {
+        // "initialized" is a notification (no "id") – must produce no response.
+        let msg = json!({"jsonrpc":"2.0","method":"initialized"});
+        assert!(handle_message(&msg).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn handle_message_unknown_notification_returns_none() {
+        let msg = json!({"jsonrpc":"2.0","method":"unknown_notification"});
+        assert!(handle_message(&msg).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_tool_returns_error() {
+        let result = dispatch_tool("no_such_tool", &json!({})).await;
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn handle_message_tools_call_unknown_tool() {
+        let msg = json!({
+            "jsonrpc": "2.0", "id": 11,
+            "method": "tools/call",
+            "params": { "name": "nonexistent_tool", "arguments": {} }
+        });
+        let resp = handle_message(&msg).await.unwrap();
+        assert_eq!(resp["id"], 11);
+        // MCP tool error is surfaced in result, not as a JSON-RPC error.
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn handle_message_tools_call_missing_params() {
+        let msg = json!({"jsonrpc":"2.0","id":12,"method":"tools/call"});
+        let resp = handle_message(&msg).await.unwrap();
+        assert_eq!(resp["id"], 12);
+        assert_eq!(resp["result"]["isError"], true);
+    }
+
+    // -----------------------------------------------------------------------
+    // run_dual_description – argument validation (no binary required)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn dual_description_missing_matrix_key() {
+        let result = run_dual_description(&json!({})).await;
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn dual_description_null_matrix() {
+        let result = run_dual_description(&json!({"matrix": null})).await;
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn dual_description_empty_matrix() {
+        let result = run_dual_description(&json!({"matrix": []})).await;
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn dual_description_empty_row() {
+        let result = run_dual_description(&json!({"matrix": [[]]})).await;
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn dual_description_inconsistent_row_length() {
+        // Row 0 has 2 elements, row 1 has 1.
+        let result = run_dual_description(&json!({"matrix": [[1,0],[1]]})).await;
+        assert_eq!(result["isError"], true);
+    }
+
+    #[tokio::test]
+    async fn dual_description_non_array_row() {
+        let result = run_dual_description(&json!({"matrix": [42]})).await;
+        assert_eq!(result["isError"], true);
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration tests – require POLY_dual_description in PATH
+    // -----------------------------------------------------------------------
+
+    fn binary_available() -> bool {
+        std::process::Command::new("sh")
+            .args(["-c", "command -v POLY_dual_description"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+
+    /// The positive orthant in R^3 is self-dual: H-rep and V-rep are both
+    /// the three standard basis vectors (3 rows × 3 cols).
+    #[tokio::test]
+    async fn integration_positive_orthant_r3() {
+        if !binary_available() {
+            eprintln!("SKIP: POLY_dual_description not found in PATH");
+            return;
+        }
+        let args = json!({"matrix": [[1,0,0],[0,1,0],[0,0,1]]});
+        let result = run_dual_description(&args).await;
+        assert!(
+            result.get("isError").is_none() || result["isError"] != true,
+            "unexpected error: {result:?}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        let rows = parsed["matrix"].as_array().unwrap();
+        assert_eq!(rows.len(), 3, "expected 3 extreme rays, got {}", rows.len());
+        for row in rows {
+            assert_eq!(row.as_array().unwrap().len(), 3);
+        }
+    }
+
+    /// The positive quadrant in R^2 (2 inequalities → 2 extreme rays).
+    #[tokio::test]
+    async fn integration_positive_quadrant_r2() {
+        if !binary_available() {
+            eprintln!("SKIP: POLY_dual_description not found in PATH");
+            return;
+        }
+        let args = json!({"matrix": [[1,0],[0,1]]});
+        let result = run_dual_description(&args).await;
+        assert!(
+            result.get("isError").is_none() || result["isError"] != true,
+            "unexpected error: {result:?}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        let rows = parsed["matrix"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "expected 2 extreme rays, got {}", rows.len());
+        for row in rows {
+            assert_eq!(row.as_array().unwrap().len(), 2);
+        }
+    }
+
+    /// End-to-end test via handle_message for a tools/call request.
+    #[tokio::test]
+    async fn integration_handle_message_tools_call() {
+        if !binary_available() {
+            eprintln!("SKIP: POLY_dual_description not found in PATH");
+            return;
+        }
+        let msg = json!({
+            "jsonrpc": "2.0", "id": 10,
+            "method": "tools/call",
+            "params": {
+                "name": "dual_description",
+                "arguments": { "matrix": [[1,0],[0,1]] }
+            }
+        });
+        let resp = handle_message(&msg).await.unwrap();
+        assert_eq!(resp["id"], 10);
+        let result = &resp["result"];
+        assert!(result.get("isError").is_none() || result["isError"] != true);
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert!(parsed["matrix"].is_array());
+    }
+
+    /// Test with the lrs backend (accepted even if lrs is not installed).
+    #[tokio::test]
+    async fn integration_lrs_backend() {
+        if !binary_available() {
+            eprintln!("SKIP: POLY_dual_description not found in PATH");
+            return;
+        }
+        let args = json!({
+            "matrix": [[1,0,0],[0,1,0],[0,0,1]],
+            "backend": "lrs"
+        });
+        let result = run_dual_description(&args).await;
+        if result.get("isError").map(|v| v == true).unwrap_or(false) {
+            let msg = result["content"][0]["text"].as_str().unwrap_or("");
+            eprintln!("lrs backend not available or failed: {msg}");
+        } else {
+            let text = result["content"][0]["text"].as_str().unwrap();
+            let parsed: Value = serde_json::from_str(text).unwrap();
+            assert!(parsed["matrix"].is_array());
+        }
+    }
+
+    /// Test with an explicit arithmetic type.
+    #[tokio::test]
+    async fn integration_rational_arithmetic() {
+        if !binary_available() {
+            eprintln!("SKIP: POLY_dual_description not found in PATH");
+            return;
+        }
+        let args = json!({
+            "matrix": [[1,0,0],[0,1,0],[0,0,1]],
+            "arithmetic": "rational"
+        });
+        let result = run_dual_description(&args).await;
+        assert!(
+            result.get("isError").is_none() || result["isError"] != true,
+            "unexpected error: {result:?}"
+        );
+        let text = result["content"][0]["text"].as_str().unwrap();
+        let parsed: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(parsed["matrix"].as_array().unwrap().len(), 3);
+    }
+}
