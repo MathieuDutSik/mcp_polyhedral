@@ -1,0 +1,16 @@
+[package]
+name = "mcp-polyhedral"
+version = "0.1.0"
+edition = "2021"
+description = "MCP server providing polyhedral computation tools"
+authors = ["Mathieu Dutour Sikiric <mathieu.dutour@gmail.com>"]
+
+[[bin]]
+name = "mcp-polyhedral"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tempfile = "3"
